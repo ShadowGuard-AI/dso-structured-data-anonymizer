@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # dso-structured-data-anonymizer
 Anonymizes structured data formats (JSON, CSV, XML) by replacing sensitive fields with configurable placeholder values based on field names or patterns, using `jq` or similar tools. - Focused on Tools for sanitizing and obfuscating sensitive data within text files and structured data formats
 
