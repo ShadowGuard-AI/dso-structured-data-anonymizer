@@ -95,12 +95,19 @@ def anonymize_json(data, config):
         dict: The anonymized JSON data.
     """
     if not isinstance(data, dict) and not isinstance(data, list):
-      return data # Return immediately, avoids crash for non-dicts/lists
-    
-    if isinstance(data, list):
-      return [anonymize_json(item, config) for item in data]
+      return data, 0
 
-    for key, value in data.items():
+    if isinstance(data, list):
+      total = 0
+      out = []
+      for item in data:
+          new_item, n = anonymize_json(item, config)
+          out.append(new_item)
+          total += n
+      return out, total
+
+    count = 0
+    for key, value in list(data.items()):
         if key in config:
             action = config[key].get("action", "replace")
             placeholder = config[key].get("placeholder", "")
@@ -109,15 +116,17 @@ def anonymize_json(data, config):
             if regex:
                 try:
                     if isinstance(value, str):
-                        data[key] = re.sub(regex, placeholder, value)
+                        data[key], n = re.subn(regex, placeholder, value)
+                        count += n
                     else:
                         logging.warning(f"Field {key} with regex requires a string value, skipping.")
 
                 except re.error as e:
                     logging.error(f"Invalid regex for field {key}: {e}")
                     continue
-                    
+
             elif action == "replace":
+                count += 1
                 if placeholder == "fake.name":
                     data[key] = fake.name()
                 elif placeholder == "fake.email":
@@ -135,145 +144,168 @@ def anonymize_json(data, config):
 
             elif action == "remove":
                 del data[key]
+                count += 1
             else:
                 logging.warning(f"Unknown action '{action}' for field '{key}'. Skipping.")
 
         elif isinstance(value, dict):
-            data[key] = anonymize_json(value, config)
+            data[key], n = anonymize_json(value, config)
+            count += n
         elif isinstance(value, list):
-            data[key] = [anonymize_json(item, config) for item in value]
-    return data
+            new_list = []
+            for item in value:
+                new_item, n = anonymize_json(item, config)
+                new_list.append(new_item)
+                count += n
+            data[key] = new_list
+    return data, count
 
 
 def anonymize_csv(input_file, output_file, config):
     """
-    Anonymizes CSV data based on the provided configuration.
-
-    Args:
-        input_file (str): Path to the input CSV file.
-        output_file (str): Path to the output anonymized CSV file.
-        config (dict): The anonymization configuration (mapping column names to anonymization actions).
+    Anonymizes CSV data. Reads the whole input before opening the output,
+    propagates errors, and returns the number of values anonymized.
     """
+    if os.path.realpath(input_file) == os.path.realpath(output_file):
+        raise ValueError("Output file resolves to the input file; refusing to overwrite it.")
     encoding = detect_encoding(input_file)
     if not encoding:
         logging.error("Failed to detect file encoding.  Using utf-8 as default.")
         encoding = 'utf-8'
-
-    try:
-        with open(input_file, 'r', encoding=encoding) as infile, open(output_file, 'w', newline='', encoding=encoding) as outfile:
-            reader = csv.DictReader(infile)
-            fieldnames = reader.fieldnames
-            writer = csv.DictWriter(outfile, fieldnames=fieldnames)
-            writer.writeheader()
-
-            for row in reader:
-                anonymized_row = {}
-                for field in fieldnames:
-                    if field in config:
-                        action = config[field].get("action", "replace")
-                        placeholder = config[field].get("placeholder", "")
-                        regex = config[field].get("regex")
-                        value = row.get(field, "")  # Handle missing columns gracefully
-
-                        if regex:
-                            try:
-                                if isinstance(value, str):
-                                  anonymized_row[field] = re.sub(regex, placeholder, value)
-                                else:
-                                  logging.warning(f"Field {field} with regex requires string value, skipping.")
-                                  anonymized_row[field] = value
-
-                            except re.error as e:
-                                logging.error(f"Invalid regex for field {field}: {e}")
-                                anonymized_row[field] = value
-                        elif action == "replace":
-                            if placeholder == "fake.name":
-                                anonymized_row[field] = fake.name()
-                            elif placeholder == "fake.email":
-                                anonymized_row[field] = fake.email()
-                            elif placeholder == "fake.address":
-                                anonymized_row[field] = fake.address()
-                            elif placeholder == "fake.phone_number":
-                                anonymized_row[field] = fake.phone_number()
-                            elif placeholder == "fake.date":
-                                anonymized_row[field] = str(fake.date())
-                            else:
-                                anonymized_row[field] = placeholder
-                        elif action == "remove":
-                            anonymized_row[field] = ""  # Or another suitable default
-                        else:
-                            logging.warning(f"Unknown action '{action}' for field '{field}'. Skipping.")
-                            anonymized_row[field] = value  # Keep original if action unknown
+    with open(input_file, 'r', encoding=encoding, newline='') as infile:
+        reader = csv.DictReader(infile)
+        fieldnames = reader.fieldnames
+        if not fieldnames:
+            raise ValueError("CSV file is empty or has no header.")
+        rows = list(reader)
+    if not rows:
+        raise ValueError("CSV file has no data rows.")
+    count = 0
+    out_rows = []
+    for row in rows:
+        anonymized_row = {}
+        for field in fieldnames:
+            if field in config:
+                action = config[field].get("action", "replace")
+                placeholder = config[field].get("placeholder", "")
+                regex = config[field].get("regex")
+                value = row.get(field, "")
+                if regex:
+                    if isinstance(value, str):
+                        anonymized_row[field], n = re.subn(regex, placeholder, value)
+                        count += n
                     else:
-                        anonymized_row[field] = row[field]
-                writer.writerow(anonymized_row)
+                        anonymized_row[field] = value
+                elif action == "replace":
+                    if placeholder == "fake.name":
+                        anonymized_row[field] = fake.name()
+                    elif placeholder == "fake.email":
+                        anonymized_row[field] = fake.email()
+                    elif placeholder == "fake.address":
+                        anonymized_row[field] = fake.address()
+                    elif placeholder == "fake.phone_number":
+                        anonymized_row[field] = fake.phone_number()
+                    elif placeholder == "fake.date":
+                        anonymized_row[field] = str(fake.date())
+                    else:
+                        anonymized_row[field] = placeholder
+                    count += 1
+                elif action == "remove":
+                    anonymized_row[field] = ""
+                    count += 1
+                else:
+                    logging.warning(f"Unknown action '{action}' for field '{field}'. Skipping.")
+                    anonymized_row[field] = value
+            else:
+                anonymized_row[field] = row[field]
+        out_rows.append(anonymized_row)
+    if count == 0:
+        raise ValueError("No values were anonymized.")
+    with open(output_file, 'w', newline='', encoding=encoding) as outfile:
+        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(out_rows)
+    return count
 
-    except FileNotFoundError:
-        logging.error(f"Input file not found: {input_file}")
-    except Exception as e:
-        logging.error(f"Error processing CSV file: {e}")
+
+def _apply_rule_to_text(value, rule):
+    """Returns (new_value, changes) for a replace or regex rule on a string."""
+    placeholder = rule.get("placeholder", "")
+    regex = rule.get("regex")
+    if regex:
+        return re.subn(regex, placeholder, value)
+    action = rule.get("action", "replace")
+    if action == "replace":
+        if placeholder == "fake.name":
+            return fake.name(), 1
+        if placeholder == "fake.email":
+            return fake.email(), 1
+        if placeholder == "fake.address":
+            return fake.address(), 1
+        if placeholder == "fake.phone_number":
+            return fake.phone_number(), 1
+        if placeholder == "fake.date":
+            return str(fake.date()), 1
+        return placeholder, 1
+    return value, 0
 
 
 def anonymize_xml(input_file, output_file, config):
     """
-    Anonymizes XML data based on the provided configuration.
-
-    Args:
-        input_file (str): Path to the input XML file.
-        output_file (str): Path to the output anonymized XML file.
-        config (dict): The anonymization configuration (mapping element paths to anonymization actions).
+    Anonymizes XML data. Element text for elements matched by a rule path is
+    anonymized, and so are attribute values whose attribute name matches a
+    rule key or the last element name in a rule path. Errors propagate, and
+    the function returns the number of values anonymized.
     """
-    try:
-        tree = ET.parse(input_file)
-        root = tree.getroot()
-
-        for element_path, rule in config.items():
-            elements = root.findall(element_path)
-            for element in elements:
-                action = rule.get("action", "replace")
-                placeholder = rule.get("placeholder", "")
-                regex = rule.get("regex")
-
-                if regex:
-                    try:
-                        if element.text:
-                            element.text = re.sub(regex, placeholder, element.text)
-                    except re.error as e:
-                        logging.error(f"Invalid regex for element {element_path}: {e}")
-
-                elif action == "replace":
-                    if placeholder == "fake.name":
-                        element.text = fake.name()
-                    elif placeholder == "fake.email":
-                        element.text = fake.email()
-                    elif placeholder == "fake.address":
-                        element.text = fake.address()
-                    elif placeholder == "fake.phone_number":
-                        element.text = fake.phone_number()
-                    elif placeholder == "fake.date":
-                        element.text = str(fake.date())
-                    else:
-                        element.text = placeholder
-
-                elif action == "remove":
-                    parent = find_parent(root, element)
-                    if parent is not None:  # Check if parent exists
-                        parent.remove(element)
-                    else:
-                        logging.warning(f"Could not find parent of element {element_path}. Skipping removal.")
-
+    tree = ET.parse(input_file)
+    root = tree.getroot()
+    count = 0
+    # Attribute rules: plain key, or last path segment of an element path.
+    attr_rules = {}
+    for key, rule in config.items():
+        name = key.rstrip('/').split('/')[-1]
+        name = name.split('[')[0].lstrip('.')
+        if name:
+            attr_rules[name] = rule
+    for element in root.iter():
+        for attr_name in list(element.attrib.keys()):
+            if attr_name in attr_rules:
+                rule = attr_rules[attr_name]
+                if rule.get("action") == "remove" and not rule.get("regex"):
+                    del element.attrib[attr_name]
+                    count += 1
                 else:
-                    logging.warning(f"Unknown action '{action}' for element '{element_path}'. Skipping.")
-
-
-        tree.write(output_file, encoding="utf-8", xml_declaration=True)
-
-    except FileNotFoundError:
-        logging.error(f"Input file not found: {input_file}")
-    except ET.ParseError as e:
-        logging.error(f"Error parsing XML file: {e}")
-    except Exception as e:
-        logging.error(f"Error processing XML file: {e}")
+                    new_value, n = _apply_rule_to_text(element.attrib[attr_name], rule)
+                    element.attrib[attr_name] = new_value
+                    count += n
+    for element_path, rule in config.items():
+        try:
+            elements = root.findall(element_path)
+        except SyntaxError:
+            elements = []
+        for element in elements:
+            action = rule.get("action", "replace")
+            regex = rule.get("regex")
+            if regex:
+                if element.text:
+                    element.text, n = re.subn(regex, rule.get("placeholder", ""), element.text)
+                    count += n
+            elif action == "replace":
+                element.text, n = _apply_rule_to_text(element.text or "", rule)
+                count += n
+            elif action == "remove":
+                parent = find_parent(root, element)
+                if parent is not None:
+                    parent.remove(element)
+                    count += 1
+                else:
+                    logging.warning(f"Could not find parent of element {element_path}. Skipping removal.")
+            else:
+                logging.warning(f"Unknown action '{action}' for element '{element_path}'. Skipping.")
+    if count == 0:
+        raise ValueError("No values were anonymized.")
+    tree.write(output_file, encoding="utf-8", xml_declaration=True)
+    return count
 
 
 def find_parent(root, element):
@@ -316,22 +348,28 @@ def main():
             if config is None:
                 logging.error("Configuration file is required for JSON anonymization.")
                 exit(1)
-            anonymized_data = anonymize_json(data, config)
+            anonymized_data, count = anonymize_json(data, config)
+            if count == 0:
+                logging.error("No values were anonymized; nothing was saved.")
+                exit(1)
             with open(args.output_file, "w") as f:
                 json.dump(anonymized_data, f, indent=4)
-            logging.info(f"JSON data anonymized and saved to {args.output_file}")
+            logging.info(f"JSON data anonymized and saved to {args.output_file} ({count} value(s) anonymized)")
         elif args.format == "csv":
             if config is None:
                 logging.error("Configuration file is required for CSV anonymization.")
                 exit(1)
-            anonymize_csv(args.input_file, args.output_file, config)
-            logging.info(f"CSV data anonymized and saved to {args.output_file}")
+            if os.path.realpath(args.input_file) == os.path.realpath(args.output_file):
+                logging.error("Output file resolves to the input file; refusing to overwrite it.")
+                exit(1)
+            count = anonymize_csv(args.input_file, args.output_file, config)
+            logging.info(f"CSV data anonymized and saved to {args.output_file} ({count} value(s) anonymized)")
         elif args.format == "xml":
             if config is None:
                 logging.error("Configuration file is required for XML anonymization.")
                 exit(1)
-            anonymize_xml(args.input_file, args.output_file, config)
-            logging.info(f"XML data anonymized and saved to {args.output_file}")
+            count = anonymize_xml(args.input_file, args.output_file, config)
+            logging.info(f"XML data anonymized and saved to {args.output_file} ({count} value(s) anonymized)")
         else:
             logging.error(f"Unsupported format: {args.format}")
             exit(1)
