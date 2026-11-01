@@ -108,10 +108,15 @@ def anonymize_json(data, config):
 
     count = 0
     for key, value in list(data.items()):
+        # A configured key is handled here and never recursed into. The elif chain
+        # below is the point: once a field name matches, its value is replaced,
+        # removed, or left alone, and any fields nested under it are not visited.
         if key in config:
             action = config[key].get("action", "replace")
             placeholder = config[key].get("placeholder", "")
             regex = config[key].get("regex")
+            # A regex in the rule wins over the action. The action only applies when
+            # no regex is present, in all three format paths.
             
             if regex:
                 try:
@@ -119,6 +124,10 @@ def anonymize_json(data, config):
                         data[key], n = re.subn(regex, placeholder, value)
                         count += n
                     else:
+                        # A regex rule on a non-string value is skipped with a warning, and the
+                        # original value stays. An invalid regex does the same through the except
+                        # below. Both leave the field readable in the output, so the log line is
+                        # the only signal that part of the file was not anonymized.
                         logging.warning(f"Field {key} with regex requires a string value, skipping.")
 
                 except re.error as e:
@@ -138,6 +147,8 @@ def anonymize_json(data, config):
                 elif placeholder == "fake.date":
                     data[key] = str(fake.date())
                 elif placeholder == "null":
+                    # The string null is a JSON only placeholder. CSV has no null, so the same
+                    # config value would be written as the literal word null there.
                     data[key] = None  # Use None for JSON null
                 else:
                     data[key] = placeholder
@@ -166,6 +177,9 @@ def anonymize_csv(input_file, output_file, config):
     Anonymizes CSV data. Reads the whole input before opening the output,
     propagates errors, and returns the number of values anonymized.
     """
+    # Checked here and again in main for the CSV path. The function reads the
+    # whole input before opening the output, but I do not rely on that order
+    # to protect the input; the refusal is explicit.
     if os.path.realpath(input_file) == os.path.realpath(output_file):
         raise ValueError("Output file resolves to the input file; refusing to overwrite it.")
     encoding = detect_encoding(input_file)
@@ -177,6 +191,8 @@ def anonymize_csv(input_file, output_file, config):
         fieldnames = reader.fieldnames
         if not fieldnames:
             raise ValueError("CSV file is empty or has no header.")
+        # Every row is read and transformed before the output file is opened.
+        # A failure halfway through the input leaves no partial output behind.
         rows = list(reader)
     if not rows:
         raise ValueError("CSV file has no data rows.")
@@ -211,6 +227,9 @@ def anonymize_csv(input_file, output_file, config):
                         anonymized_row[field] = placeholder
                     count += 1
                 elif action == "remove":
+                    # Remove means different things per format. JSON deletes the key; CSV
+                    # keeps the column and blanks the cell, because dropping a column would
+                    # shift every value after it for downstream readers.
                     anonymized_row[field] = ""
                     count += 1
                 else:
@@ -261,6 +280,11 @@ def anonymize_xml(input_file, output_file, config):
     root = tree.getroot()
     count = 0
     # Attribute rules: plain key, or last path segment of an element path.
+    # Attribute rules are derived, not configured separately. The last segment
+    # of each config key becomes an attribute name, so a path rule for a field
+    # also rewrites any attribute with that name, anywhere in the tree. That
+    # breadth is deliberate, and it is why the pass below runs over every
+    # element before the element text pass starts.
     attr_rules = {}
     for key, rule in config.items():
         name = key.rstrip('/').split('/')[-1]
@@ -308,6 +332,9 @@ def anonymize_xml(input_file, output_file, config):
     return count
 
 
+# ElementTree gives no parent pointer, so removal searches the whole tree
+# by identity. Fine for the file sizes this tool sees, quadratic in the
+# number of elements in the worst case.
 def find_parent(root, element):
     """Finds the parent of an element in an XML tree."""
     for parent in root.iter():
@@ -341,6 +368,9 @@ def main():
         if args.format == "json":
             with open(args.input_file, "r") as f:
                 try:
+                    # The JSON path reads and writes with the platform default encoding. The
+                    # chardet detection above is only used by the CSV path, so a non utf-8
+                    # JSON file fails at this load instead of being detected.
                     data = json.load(f)
                 except json.JSONDecodeError as e:
                     logging.error(f"Error decoding JSON file: {e}")
